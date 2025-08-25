@@ -112,7 +112,7 @@ if uploaded is not None:
     html_name = uploaded.name
     html_bytes = uploaded.read()
     # Save to a temp file inside Streamlit's cache dir so static server can serve it if needed
-    tmp_dir = Path(st.experimental_user) if hasattr(st, "experimental_user") else Path(os.getcwd())
+    tmp_dir = Path(st.user) if hasattr(st, "user") else Path(os.getcwd())
     # Fallback to a subdir in CWD to avoid permission fuss
     tmp_dir = tmp_dir / "._html_viewer_cache"
     tmp_dir.mkdir(parents=True, exist_ok=True)
