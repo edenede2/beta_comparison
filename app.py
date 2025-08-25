@@ -186,7 +186,7 @@ else:
         time.sleep(0.1)  # small grace period
 
     port = st.session_state._static_port
-    src = f"http://localhost:{port}/{html_path.name}"
+    src = f"/Users/edeneldar/beta_comparison/corr_beta_MULTI_REPORT.html"
 
     with placeholder.container():
         st.markdown(
