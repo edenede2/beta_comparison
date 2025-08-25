@@ -14,10 +14,7 @@
 # -----------------------------------------------------
 
 import os
-import io
-import sys
 import time
-import mimetypes
 import threading
 import socket
 from http.server import SimpleHTTPRequestHandler
@@ -47,20 +44,20 @@ def _find_free_port() -> int:
 
 class _QuietHandler(SimpleHTTPRequestHandler):
     # Reduce logging noise in Streamlit terminal
-    def log_message(self, format, *args):  # noqa: N802 (keep signature)
+    def log_message(self, format, *args):  # keep signature-compatible; pylint: disable=redefined-builtin
         pass
 
 
-def _start_static_server(root_dir: Path, port: int) -> TCPServer:
+def _start_static_server(root_dir: Path, listen_port: int) -> TCPServer:
     # Change working directory for the handler to serve from root_dir
     # We create a handler subclass bound to that directory
     os.chdir(root_dir)
-    httpd = TCPServer(("localhost", port), _QuietHandler)
+    httpd = TCPServer(("localhost", listen_port), _QuietHandler)
 
     def _serve():
         try:
             httpd.serve_forever()
-        except Exception:
+        except OSError:
             pass
 
     t = threading.Thread(target=_serve, daemon=True)
@@ -68,25 +65,25 @@ def _start_static_server(root_dir: Path, port: int) -> TCPServer:
     return httpd
 
 
-def _stop_static_server(server: TCPServer | None):
-    if server is not None:
+def _stop_static_server(srv: TCPServer | None):
+    if srv is not None:
         try:
-            server.shutdown()
-        except Exception:
+            srv.shutdown()
+        except OSError:
             pass
         try:
-            server.server_close()
-        except Exception:
+            srv.server_close()
+        except OSError:
             pass
 
 
-# Persist server state between reruns
-if "_static_server" not in st.session_state:
-    st.session_state._static_server = None
-if "_static_root" not in st.session_state:
-    st.session_state._static_root = None
-if "_static_port" not in st.session_state:
-    st.session_state._static_port = None
+# Persist server state between reruns (avoid leading underscores for lint friendliness)
+if "static_server" not in st.session_state:
+    st.session_state.static_server = None
+if "static_root" not in st.session_state:
+    st.session_state.static_root = None
+if "static_port" not in st.session_state:
+    st.session_state.static_port = None
 
 # ---------------------- UI ----------------------
 
@@ -98,7 +95,8 @@ with colA:
     path_str = st.text_input("...or enter a local path to an HTML file", value="", placeholder="/path/to/file.html")
 
 with colB:
-    mode = st.radio("Rendering mode", ["Embed (srcdoc)", "Static server (handles assets)"], index=1, help="Use 'Static server' if your HTML uses relative CSS/JS/images.")
+    # Default to Embed mode for Streamlit Cloud compatibility. Local users can switch to Static server.
+    mode = st.radio("Rendering mode", ["Embed (srcdoc)", "Static server (handles assets)"], index=0, help="Use 'Static server' locally if your HTML uses relative CSS/JS/images. On Streamlit Cloud, Embed is recommended.")
     iframe_h = st.number_input("Iframe height (px)", min_value=200, max_value=5000, value=900, step=50)
     dark_bg = st.toggle("Dark page background", value=True)
     show_download = st.toggle("Show download button", value=True)
@@ -112,9 +110,8 @@ if uploaded is not None:
     html_name = uploaded.name
     html_bytes = uploaded.read()
     # Save to a temp file inside Streamlit's cache dir so static server can serve it if needed
-    tmp_dir = Path(st.user) if hasattr(st, "user") else Path(os.getcwd())
-    # Fallback to a subdir in CWD to avoid permission fuss
-    tmp_dir = tmp_dir / "._html_viewer_cache"
+    import tempfile
+    tmp_dir = Path(tempfile.gettempdir()) / "_html_viewer_cache"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     html_path = tmp_dir / html_name
     html_path.write_bytes(html_bytes)
@@ -125,7 +122,7 @@ elif path_str.strip():
         html_name = p.name
         try:
             html_bytes = p.read_bytes()
-        except Exception as e:
+        except OSError as e:
             st.error(f"Failed to read file: {e}")
     else:
         st.warning("Path does not exist or is not a file.")
@@ -144,9 +141,20 @@ st.markdown(
 
 # ---------------------- Render ----------------------
 
+# If no input provided, try to load a default HTML from the repo (useful on Streamlit Cloud)
 if html_path is None:
-    st.info("Upload a file or enter a path to begin.")
-    st.stop()
+    default_repo_html = Path(__file__).parent / "corr_beta_MULTI_REPORT.html"
+    if default_repo_html.exists():
+        html_path = default_repo_html
+        html_name = default_repo_html.name
+        try:
+            html_bytes = default_repo_html.read_bytes()
+        except OSError:
+            html_bytes = None
+        st.info("Loaded default repository HTML: corr_beta_MULTI_REPORT.html")
+    else:
+        st.info("Upload a file, enter a path, or include 'corr_beta_MULTI_REPORT.html' in the repository root.")
+        st.stop()
 
 st.caption(f"Selected: **{html_name}**  •  Location: `{str(html_path)}`")
 
@@ -158,35 +166,36 @@ placeholder = st.empty()
 if mode.startswith("Embed"):
     try:
         content = _read_text(html_path)
-    except Exception as e:
+    except OSError as e:
         st.error(f"Could not read HTML: {e}")
     else:
         with placeholder.container():
             st_html(content, height=int(iframe_h), scrolling=True)
     # Stop any static server if running
-    if st.session_state._static_server is not None:
-        _stop_static_server(st.session_state._static_server)
-        st.session_state._static_server = None
-        st.session_state._static_root = None
-        st.session_state._static_port = None
+    if st.session_state.static_server is not None:
+        _stop_static_server(st.session_state.static_server)
+        st.session_state.static_server = None
+        st.session_state.static_root = None
+        st.session_state.static_port = None
 else:
     # Serve the parent directory so relative assets resolve
     root = html_path.parent
     needs_restart = (
-        st.session_state._static_server is None
-        or st.session_state._static_root != str(root)
+        st.session_state.static_server is None
+        or st.session_state.static_root != str(root)
     )
     if needs_restart:
-        _stop_static_server(st.session_state._static_server)
+        _stop_static_server(st.session_state.static_server)
         port = _find_free_port()
         server = _start_static_server(root, port)
-        st.session_state._static_server = server
-        st.session_state._static_root = str(root)
-        st.session_state._static_port = port
+        st.session_state.static_server = server
+        st.session_state.static_root = str(root)
+        st.session_state.static_port = port
         time.sleep(0.1)  # small grace period
 
-    port = st.session_state._static_port
-    src = f".corr_beta_MULTI_REPORT.html"
+    port = st.session_state.static_port
+    # Point iframe to the file served by the local static server
+    src = f"http://127.0.0.1:{port}/{html_path.name}"
 
     with placeholder.container():
         st.markdown(
@@ -195,4 +204,4 @@ else:
         )
 
 # Footer
-st.caption("Tip: If your HTML uses big local assets, prefer 'Static server' mode so relative links resolve correctly.")
+st.caption("Tip: On Streamlit Cloud, use 'Embed (srcdoc)'. For local runs with many assets, 'Static server' can help relative links resolve.")
